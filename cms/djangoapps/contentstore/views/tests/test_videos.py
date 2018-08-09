@@ -37,7 +37,11 @@ from contentstore.views.videos import (
 from contentstore.views.videos import KEY_EXPIRATION_IN_SECONDS, StatusDisplayStrings, convert_video_status
 from xmodule.modulestore.tests.factories import CourseFactory
 
+from openedx.core.djangoapps.video_pipeline.config.waffle import DEPRECATE_YOUTUBE
 from openedx.core.djangoapps.profile_images.tests.helpers import make_image_file
+from openedx.core.djangoapps.waffle_utils.models import WaffleFlagCourseOverrideModel
+from openedx.core.djangoapps.waffle_utils.testutils import override_waffle_flag
+
 from edxval.api import create_or_update_transcript_preferences, get_transcript_preferences
 
 
@@ -439,7 +443,25 @@ class VideosHandlerTestCase(VideoUploadTestMixin, CourseTestCase):
     @override_settings(AWS_ACCESS_KEY_ID='test_key_id', AWS_SECRET_ACCESS_KEY='test_secret')
     @patch('boto.s3.key.Key')
     @patch('boto.s3.connection.S3Connection')
-    def test_post_success(self, mock_conn, mock_key):
+    @ddt.data(
+        {
+            'global_waffle': True,
+            'course_override': WaffleFlagCourseOverrideModel.ALL_CHOICES.off,
+            'include_token': False
+        },
+        {
+            'global_waffle': False,
+            'course_override': WaffleFlagCourseOverrideModel.ALL_CHOICES.on,
+            'include_token': False
+        },
+        {
+            'global_waffle': False,
+            'course_override': WaffleFlagCourseOverrideModel.ALL_CHOICES.off,
+            'include_token': True
+        }
+    )
+    @ddt.unpack
+    def test_post_success(self, data, mock_conn, mock_key):
         files = [
             {
                 'file_name': 'first.mp4',
@@ -497,10 +519,21 @@ class VideosHandlerTestCase(VideoUploadTestMixin, CourseTestCase):
             self.assertIsNotNone(path_match)
             video_id = path_match.group(1)
             mock_key_instance = mock_key_instances[i]
-            mock_key_instance.set_metadata.assert_any_call(
-                'course_video_upload_token',
-                self.test_token
-            )
+
+            with patch.object(WaffleFlagCourseOverrideModel, 'override_value', return_value=data['course_override']):
+                with override_waffle_flag(DEPRECATE_YOUTUBE, active=data['global_waffle']):
+                    if data['include_token']:
+                        mock_key_instance.set_metadata.assert_any_call(
+                            'course_video_upload_token',
+                            self.test_token
+                        )
+                    else:
+                        with self.assertRaises(AssertionError):
+                            mock_key_instance.set_metadata.assert_any_call(
+                                'course_video_upload_token',
+                                self.test_token
+                            )
+
             mock_key_instance.set_metadata.assert_any_call(
                 'client_video_id',
                 file_info['file_name']
